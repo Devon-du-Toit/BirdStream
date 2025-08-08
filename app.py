@@ -3,6 +3,10 @@ import time
 import cv2
 from flask import Flask, Response, render_template_string
 from picamera2 import Picamera2
+import numpy as np
+
+last_frame_gray = None
+motion_detected = False
 
 # --- Camera setup ---
 picam2 = Picamera2()
@@ -28,19 +32,60 @@ PAGE = """
 <img src="/stream" alt="Bird Stream" />
 """
 
-def mjpeg_generator(jpeg_quality=80, fps=15):
+def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1200): # play around between 1000 - 2000
+    global last_frame_gray, motion_detected
     delay = 1.0 / fps
     while True:
         frame = picam2.capture_array()  # RGB
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        gray = cv2.GaussianBlur(gray, (21, 21), 0)
+
+        if last_frame_gray is None:
+            last_frame_gray = gray
+            # Encode first frame to show something
+            ok, jpg = cv2.imencode(".jpg", frame,
+                                   [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
+            if ok:
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" +
+                       jpg.tobytes() + b"\r\n")
+            time.sleep(delay)
+            continue
+
+        # Compute absolute difference between current frame and previous
+        frame_delta = cv2.absdiff(last_frame_gray, gray)
+        thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+        thresh = cv2.dilate(thresh, None, iterations=2)
+
+        contours, _ = cv2.findContours(
+            thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        motion_detected = False
+        for c in contours:
+            if cv2.contourArea(c) < min_area:
+                continue
+            motion_detected = True
+            break
+
+        last_frame_gray = gray
+
+        # Display motion status on frame
+        label = "Motion Detected" if motion_detected else "No Motion"
+        cv2.putText(
+            frame, label, (10, frame.shape[0] - 10),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2
+        )
+
         # Encode to JPEG for MJPEG streaming
         ok, jpg = cv2.imencode(".jpg", frame,
             [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
-
         if not ok:
             continue
-        buf = jpg.tobytes()
-        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf + b"\r\n")
+
+        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" +
+               jpg.tobytes() + b"\r\n")
         time.sleep(delay)
+
 
 @app.route("/")
 def index():
