@@ -4,7 +4,15 @@ import cv2
 from flask import Flask, Response, render_template_string
 from picamera2 import Picamera2
 import numpy as np
+import subprocess
+import uuid
 
+last_frame_gray = None
+motion_counter = 0
+motion_threshold = 3
+motion_detected = False
+last_prediction = "No species yet"
+prediction_running = False
 last_frame_gray = None
 motion_detected = False
 
@@ -32,17 +40,20 @@ PAGE = """
 <img src="/stream" alt="Bird Stream" />
 """
 
-def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1200): # play around between 1000 - 2000
-    global last_frame_gray, motion_detected
+def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
+    global last_frame_gray, motion_counter, motion_detected
+    global last_prediction, prediction_running
+
     delay = 1.0 / fps
+
     while True:
         frame = picam2.capture_array()  # RGB
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         gray = cv2.GaussianBlur(gray, (21, 21), 0)
 
         if last_frame_gray is None:
-            last_frame_gray = gray
-            # Encode first frame to show something
+            last_frame_gray = gray.copy().astype("float")
+            # Show first frame even if no motion yet
             ok, jpg = cv2.imencode(".jpg", frame,
                                    [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
             if ok:
@@ -51,41 +62,92 @@ def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1200): # play around betwe
             time.sleep(delay)
             continue
 
-        # Compute absolute difference between current frame and previous
-        frame_delta = cv2.absdiff(last_frame_gray, gray)
-        thresh = cv2.threshold(frame_delta, 25, 255, cv2.THRESH_BINARY)[1]
+        # Smooth background
+        alpha = 0.05
+        cv2.accumulateWeighted(gray, last_frame_gray, alpha)
+        frame_delta = cv2.absdiff(gray, cv2.convertScaleAbs(last_frame_gray))
+        thresh = cv2.threshold(frame_delta, 40, 255, cv2.THRESH_BINARY)[1]
         thresh = cv2.dilate(thresh, None, iterations=2)
 
-        contours, _ = cv2.findContours(
-            thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+        contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        motion_detected = False
+        motion_this_frame = False
         for c in contours:
             if cv2.contourArea(c) < min_area:
                 continue
-            motion_detected = True
+            motion_this_frame = True
             break
 
-        last_frame_gray = gray
+        if motion_this_frame:
+            motion_counter += 1
+        else:
+            motion_counter = 0
 
-        # Display motion status on frame
-        label = "Motion Detected" if motion_detected else "No Motion"
-        cv2.putText(
-            frame, label, (10, frame.shape[0] - 10),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2
-        )
+        if motion_counter >= motion_threshold and not prediction_running:
+            motion_detected = True
+            prediction_running = True
 
-        # Encode to JPEG for MJPEG streaming
+            # Run prediction after 2 seconds (non-blocking with subprocess/thread later if needed)
+            print("Motion detected, waiting 2s...")
+            time.sleep(2)
+            print("Capturing frame for prediction...")
+
+            # Save frame
+            img_path = f"/tmp/{uuid.uuid4().hex}.jpg"
+            cv2.imwrite(img_path, frame)
+
+            try:
+                result = subprocess.check_output(["python3", "predict_species.py", img_path])
+                last_prediction = result.decode().strip()
+                print("Predicted species:", last_prediction)
+            except Exception as e:
+                print("Prediction failed:", e)
+                last_prediction = "Prediction error"
+
+        elif motion_counter == 0:
+            motion_detected = False
+            prediction_running = False
+
+        # === Draw overlays with background ===
+        species_text = f"Species: {last_prediction}"
+        motion_text = "Motion Detected" if motion_detected else "No Motion"
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.8
+        thickness = 2
+        text_color = (255, 255, 255)  # white
+
+        # Get text sizes
+        (w1, h1), _ = cv2.getTextSize(species_text, font, scale, thickness)
+        (w2, h2), _ = cv2.getTextSize(motion_text, font, scale, thickness)
+
+        # Position
+        pad = 10
+        spacing = 8
+        box_width = max(w1, w2) + 2 * pad
+        box_height = h1 + h2 + spacing + 3 * pad
+
+        # Draw semi-transparent blue background
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (5, 5), (5 + box_width, 5 + box_height), (255, 170, 86), -1)  # BGR blue
+        cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+
+        # Draw text on top
+        cv2.putText(frame, species_text, (5 + pad, 5 + pad + h1),
+                    font, scale, text_color, thickness)
+        cv2.putText(frame, motion_text, (5 + pad, 5 + pad + h1 + spacing + h2),
+                    font, scale, text_color, thickness)
+
+        # Stream the frame
         ok, jpg = cv2.imencode(".jpg", frame,
-            [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
+                               [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
         if not ok:
             continue
 
         yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" +
                jpg.tobytes() + b"\r\n")
-        time.sleep(delay)
 
+        time.sleep(delay)
 
 @app.route("/")
 def index():
