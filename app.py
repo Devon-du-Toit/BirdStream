@@ -117,14 +117,24 @@ def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
         motion_detected = display_motion  # keep your existing flag consistent
 
         # === Draw overlays with background (do this EVERY frame) ===
-        species_text = f"Species: {last_prediction}"
+        # Tie species display to motion's 20s hold
+        if display_motion:
+            if prediction_running:
+                species_line = "Analyzing..."
+            else:
+                species_line = last_prediction if last_prediction else "No species yet"
+        else:
+            species_line = "No species yet"
+
+        species_text = f"Species: {species_line}"
         motion_text = "Motion Detected" if display_motion else "No Motion"
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         scale = 0.8
         thickness = 2
-        text_color = (255, 255, 255)  # white
+        text_color = (255, 255, 255)
 
+        # Measure AFTER deciding texts
         (w1, h1), _ = cv2.getTextSize(species_text, font, scale, thickness)
         (w2, h2), _ = cv2.getTextSize(motion_text, font, scale, thickness)
 
@@ -141,9 +151,12 @@ def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
         cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 170, 86), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.6, 0, frame)
 
-        cv2.putText(frame, species_text, (x1 + pad, frame_height - box_height + pad + h1),
+        cv2.putText(frame, species_text,
+                    (x1 + pad, frame_height - box_height + pad + h1),
                     font, scale, text_color, thickness)
-        cv2.putText(frame, motion_text, (x1 + pad, frame_height - box_height + pad + h1 + spacing + h2),
+
+        cv2.putText(frame, motion_text,
+                    (x1 + pad, frame_height - box_height + pad + h1 + spacing + h2),
                     font, scale, text_color, thickness)
 
         # Stream the frame
