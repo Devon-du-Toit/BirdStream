@@ -6,6 +6,7 @@ from picamera2 import Picamera2
 import numpy as np
 import subprocess
 import uuid
+import threading
 
 last_frame_gray = None
 motion_counter = 0
@@ -15,6 +16,7 @@ last_prediction = "No species yet"
 prediction_running = False
 last_frame_gray = None
 motion_detected = False
+capture_lock = threading.Lock()
 
 # --- Camera setup ---
 picam2 = Picamera2()
@@ -40,6 +42,25 @@ PAGE = """
 <img src="/stream" alt="Bird Stream" />
 """
 
+def run_prediction():
+    global last_prediction, prediction_running
+    try:
+        time.sleep(2)  # wait before capture
+        # take a fresh frame AFTER the delay, safely
+        with capture_lock:
+            fresh = picam2.capture_array()
+        img_path = f"/tmp/{uuid.uuid4().hex}.jpg"
+        cv2.imwrite(img_path, fresh)
+        result = subprocess.check_output(["python3", "predict_species.py", img_path])
+        last_prediction = result.decode().strip()
+        print("Predicted species:", last_prediction)
+    except Exception as e:
+        print("Prediction failed:", e)
+        last_prediction = "Prediction error"
+    finally:
+        prediction_running = False
+
+
 def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
     global last_frame_gray, motion_counter, motion_detected
     global last_prediction, prediction_running
@@ -47,7 +68,9 @@ def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
     delay = 1.0 / fps
 
     while True:
-        frame = picam2.capture_array()  # RGB
+        with capture_lock:
+            frame = picam2.capture_array()  # RGB
+
         gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         gray = cv2.GaussianBlur(gray, (21, 21), 0)
 
@@ -83,30 +106,15 @@ def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
         else:
             motion_counter = 0
 
+        # in mjpeg_generator, when triggering:
         if motion_counter >= motion_threshold and not prediction_running:
             motion_detected = True
             prediction_running = True
-
-            # Run prediction after 2 seconds (non-blocking with subprocess/thread later if needed)
-            print("Motion detected, waiting 2s...")
-            time.sleep(2)
-            print("Capturing frame for prediction...")
-
-            # Save frame
-            img_path = f"/tmp/{uuid.uuid4().hex}.jpg"
-            cv2.imwrite(img_path, frame)
-
-            try:
-                result = subprocess.check_output(["python3", "predict_species.py", img_path])
-                last_prediction = result.decode().strip()
-                print("Predicted species:", last_prediction)
-            except Exception as e:
-                print("Prediction failed:", e)
-                last_prediction = "Prediction error"
+            print("Motion detected, starting prediction thread...")
+            threading.Thread(target=run_prediction, daemon=True).start()
 
         elif motion_counter == 0:
             motion_detected = False
-            prediction_running = False
 
             # === Draw overlays with background ===
             species_text = f"Species: {last_prediction}"

@@ -54,15 +54,13 @@ def predict(img_path):
     interpreter.invoke()
     preds = interpreter.get_tensor(output_details[0]['index'])[0]
 
-    # If quantized output, dequantize (usually not needed for softmax classifiers)
-    # out_info = output_details[0]
-    # if 'quantization' in out_info and out_info['quantization'] != (0.0, 0):
-    #     scale, zero = out_info['quantization']
-    #     preds = scale * (preds.astype(np.float32) - zero)
-
     class_idx = int(np.argmax(preds))
-    return CLASS_NAMES[class_idx]
+    prob = float(preds[class_idx])
+    return CLASS_NAMES[class_idx], prob
+
 
 if __name__ == "__main__":
     img_path = sys.argv[1]
-    print(predict(img_path))
+    specie, prob = predict(img_path)
+    print(f"{specie} ({prob * 100:.1f}%)")  # one decimal place
+
