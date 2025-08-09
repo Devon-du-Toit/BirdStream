@@ -108,35 +108,41 @@ def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
             motion_detected = False
             prediction_running = False
 
-        # === Draw overlays with background ===
-        species_text = f"Species: {last_prediction}"
-        motion_text = "Motion Detected" if motion_detected else "No Motion"
+            # === Draw overlays with background ===
+            species_text = f"Species: {last_prediction}"
+            motion_text = "Motion Detected" if motion_detected else "No Motion"
 
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.8
-        thickness = 2
-        text_color = (255, 255, 255)  # white
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            scale = 0.8
+            thickness = 2
+            text_color = (255, 255, 255)  # white
 
-        # Get text sizes
-        (w1, h1), _ = cv2.getTextSize(species_text, font, scale, thickness)
-        (w2, h2), _ = cv2.getTextSize(motion_text, font, scale, thickness)
+            # Get text sizes
+            (w1, h1), _ = cv2.getTextSize(species_text, font, scale, thickness)
+            (w2, h2), _ = cv2.getTextSize(motion_text, font, scale, thickness)
 
-        # Position
-        pad = 10
-        spacing = 8
-        box_width = max(w1, w2) + 2 * pad
-        box_height = h1 + h2 + spacing + 3 * pad
+            # Position offsets
+            pad = 10
+            spacing = 8
+            box_width = max(w1, w2) + 2 * pad
+            box_height = h1 + h2 + spacing + 3 * pad
 
-        # Draw semi-transparent blue background
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (5, 5), (5 + box_width, 5 + box_height), (255, 170, 86), -1)  # BGR blue
-        cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+            frame_height, frame_width = frame.shape[:2]
 
-        # Draw text on top
-        cv2.putText(frame, species_text, (5 + pad, 5 + pad + h1),
-                    font, scale, text_color, thickness)
-        cv2.putText(frame, motion_text, (5 + pad, 5 + pad + h1 + spacing + h2),
-                    font, scale, text_color, thickness)
+            # Lower-left corner positions
+            x1, y1 = 5, frame_height - 5 - box_height
+            x2, y2 = x1 + box_width, frame_height - 5
+
+            # Draw semi-transparent background
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 170, 86), -1)
+            cv2.addWeighted(overlay, 0.7, frame, 0.6, 0, frame)
+
+            # Draw text
+            cv2.putText(frame, species_text, (x1 + pad, frame_height - box_height + pad + h1),
+                        font, scale, text_color, thickness)
+            cv2.putText(frame, motion_text, (x1 + pad, frame_height - box_height + pad + h1 + spacing + h2),
+                        font, scale, text_color, thickness)
 
         # Stream the frame
         ok, jpg = cv2.imencode(".jpg", frame,
