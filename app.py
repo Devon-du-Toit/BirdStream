@@ -17,6 +17,8 @@ prediction_running = False
 last_frame_gray = None
 motion_detected = False
 capture_lock = threading.Lock()
+MOTION_HOLD_SECONDS = 20
+last_motion_ts = 0.0  # epoch seconds
 
 # --- Camera setup ---
 picam2 = Picamera2()
@@ -63,7 +65,7 @@ def run_prediction():
 
 def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
     global last_frame_gray, motion_counter, motion_detected
-    global last_prediction, prediction_running
+    global last_prediction, prediction_running, last_motion_ts
 
     delay = 1.0 / fps
 
@@ -76,16 +78,13 @@ def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
 
         if last_frame_gray is None:
             last_frame_gray = gray.copy().astype("float")
-            # Show first frame even if no motion yet
-            ok, jpg = cv2.imencode(".jpg", frame,
-                                   [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
+            ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
             if ok:
-                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" +
-                       jpg.tobytes() + b"\r\n")
+                yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg.tobytes() + b"\r\n")
             time.sleep(delay)
             continue
 
-        # Smooth background
+        # Background model and motion mask
         alpha = 0.05
         cv2.accumulateWeighted(gray, last_frame_gray, alpha)
         frame_delta = cv2.absdiff(gray, cv2.convertScaleAbs(last_frame_gray))
@@ -94,72 +93,63 @@ def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
 
         contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        motion_this_frame = False
-        for c in contours:
-            if cv2.contourArea(c) < min_area:
-                continue
-            motion_this_frame = True
-            break
+        motion_this_frame = any(cv2.contourArea(c) >= min_area for c in contours)
 
         if motion_this_frame:
             motion_counter += 1
         else:
             motion_counter = 0
 
-        # in mjpeg_generator, when triggering:
+        # Trigger prediction and stamp the last-motion time
         if motion_counter >= motion_threshold and not prediction_running:
             motion_detected = True
-            prediction_running = True
+            last_motion_ts = time.time()  # <-- keep motion "alive" from now
             print("Motion detected, starting prediction thread...")
+            prediction_running = True
             threading.Thread(target=run_prediction, daemon=True).start()
+        elif motion_this_frame:
+            # refresh the hold if we keep seeing motion
+            last_motion_ts = time.time()
 
-        elif motion_counter == 0:
-            motion_detected = False
+        # Compute whether we should DISPLAY "Motion Detected"
+        now = time.time()
+        display_motion = (now - last_motion_ts) < MOTION_HOLD_SECONDS
+        motion_detected = display_motion  # keep your existing flag consistent
 
-            # === Draw overlays with background ===
-            species_text = f"Species: {last_prediction}"
-            motion_text = "Motion Detected" if motion_detected else "No Motion"
+        # === Draw overlays with background (do this EVERY frame) ===
+        species_text = f"Species: {last_prediction}"
+        motion_text = "Motion Detected" if display_motion else "No Motion"
 
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            scale = 0.8
-            thickness = 2
-            text_color = (255, 255, 255)  # white
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.8
+        thickness = 2
+        text_color = (255, 255, 255)  # white
 
-            # Get text sizes
-            (w1, h1), _ = cv2.getTextSize(species_text, font, scale, thickness)
-            (w2, h2), _ = cv2.getTextSize(motion_text, font, scale, thickness)
+        (w1, h1), _ = cv2.getTextSize(species_text, font, scale, thickness)
+        (w2, h2), _ = cv2.getTextSize(motion_text, font, scale, thickness)
 
-            # Position offsets
-            pad = 10
-            spacing = 8
-            box_width = max(w1, w2) + 2 * pad
-            box_height = h1 + h2 + spacing + 3 * pad
+        pad = 10
+        spacing = 8
+        box_width = max(w1, w2) + 2 * pad
+        box_height = h1 + h2 + spacing + 3 * pad
 
-            frame_height, frame_width = frame.shape[:2]
+        frame_height, frame_width = frame.shape[:2]
+        x1, y1 = 5, frame_height - 5 - box_height
+        x2, y2 = x1 + box_width, frame_height - 5
 
-            # Lower-left corner positions
-            x1, y1 = 5, frame_height - 5 - box_height
-            x2, y2 = x1 + box_width, frame_height - 5
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 170, 86), -1)
+        cv2.addWeighted(overlay, 0.7, frame, 0.6, 0, frame)
 
-            # Draw semi-transparent background
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 170, 86), -1)
-            cv2.addWeighted(overlay, 0.7, frame, 0.6, 0, frame)
-
-            # Draw text
-            cv2.putText(frame, species_text, (x1 + pad, frame_height - box_height + pad + h1),
-                        font, scale, text_color, thickness)
-            cv2.putText(frame, motion_text, (x1 + pad, frame_height - box_height + pad + h1 + spacing + h2),
-                        font, scale, text_color, thickness)
+        cv2.putText(frame, species_text, (x1 + pad, frame_height - box_height + pad + h1),
+                    font, scale, text_color, thickness)
+        cv2.putText(frame, motion_text, (x1 + pad, frame_height - box_height + pad + h1 + spacing + h2),
+                    font, scale, text_color, thickness)
 
         # Stream the frame
-        ok, jpg = cv2.imencode(".jpg", frame,
-                               [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
-        if not ok:
-            continue
-
-        yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" +
-               jpg.tobytes() + b"\r\n")
+        ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality])
+        if ok:
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpg.tobytes() + b"\r\n")
 
         time.sleep(delay)
 
