@@ -63,7 +63,7 @@ def run_prediction():
         prediction_running = False
 
 
-def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1000):
+def mjpeg_generator(jpeg_quality=80, fps=15, min_area=1200):
     global last_frame_gray, motion_counter, motion_detected
     global last_prediction, prediction_running, last_motion_ts
 
